@@ -1,0 +1,71 @@
+import os
+from tree_sitter import Language, Parser
+import tree_sitter_python as tspython
+import tree_sitter_javascript as tsjavascript
+import tree_sitter_go as tsgo
+
+LANGUAGE_MAP = {
+    '.py': Language(tspython.language()),
+    '.js': Language(tsjavascript.language()),
+    '.jsx': Language(tsjavascript.language()),
+    '.go': Language(tsgo.language()),
+}
+
+FUNCTION_NODE_TYPES = {
+    '.py': ['function_definition', 'class_definition'],
+    '.js': ['function_declaration', 'class_declaration', 'arrow_function'],
+    '.jsx': ['function_declaration', 'class_declaration', 'arrow_function'],
+    '.go': ['function_declaration', 'method_declaration'],
+}
+
+def chunk_file(file_path: str) -> list:
+  _, ext = os.path.splitext(file_path)
+
+  if ext not in LANGUAGE_MAP:
+    print(f"Unsupported file type: {ext}")
+    return []
+  
+  language = LANGUAGE_MAP[ext]
+  parser = Parser(language)
+
+  with open(file_path, 'r', encoding='utf-8', errors = 'ignore') as f:
+    source_code = f.read()
+
+  source_bytes = bytes(source_code, 'utf8')
+  tree = parser.parse(source_bytes)
+
+  chunks = []
+  node_types = FUNCTION_NODE_TYPES.get(ext, [])
+
+  def traverse(node):
+    if node.type in node_types:
+      start_line = node.start_point[0] + 1
+      end_line = node.end_point[0] + 1
+      chunk_text = source_code[node.start_byte: node.end_byte]
+
+      chunks.append({
+        'file_path': file_path,
+        'start_line': start_line,
+        'end_line': end_line, 
+        'node_type': node.type,
+        'content': chunk_text,
+      })
+    
+    for child in node.children:
+      traverse(child)
+
+  traverse(tree.root_node)
+  return chunks
+
+
+def chunk_files(file_paths: list[str]) -> list:
+  all_chunks =[]
+
+  for file_path in file_paths:
+    try:
+      chunks = chunk_file(file_path)
+      all_chunks.extend(chunks)
+      print(f"Chunked {file_path} into {len(chunks)} chunks")
+    except Exception as e:
+      print(f"Error chunking {file_path}: {e}")
+  return all_chunks
