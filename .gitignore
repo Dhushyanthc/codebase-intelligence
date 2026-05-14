@@ -1,0 +1,21 @@
+echo "venv/
+__pycache__/
+*.pyc
+.env" > .gitignore
+
+venv/
+
+# Ignore VS Code settings
+.vscode/
+
+# Ignore macOS metadata files
+.DS_Store
+
+# Ignore log files
+*.log
+
+# Ignore Vim swap files
+*.swp
+
+# Ignore backup files
+*.bak
