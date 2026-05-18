@@ -91,53 +91,55 @@ def query_hybrid(request: QueryRequest):
     try:
         repo_name = repo_url_to_name(request.repo_url)
 
-        
         result = client.models.embed_content(
             model="gemini-embedding-001",
             contents=request.question,
             config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
         )
         query_vector = result.embeddings[0].values
-        dense_results = query_collection(repo_name, query_vector, request.n_results)
+        dense_results = query_collection(repo_name, query_vector, request.n_results * 2)
 
-        
-        sparse_results = query_bm25(repo_name, request.question, request.n_results)
+        sparse_results = query_bm25(repo_name, request.question, request.n_results * 2)
 
-        
-        scores = {}
+        K = 60
+        rrf_scores = {}
 
-        for doc, meta, distance in zip(
+        for rank, (doc, meta, distance) in enumerate(zip(
             dense_results['documents'][0],
             dense_results['metadatas'][0],
             dense_results['distances'][0]
-        ):
+        ), start=1):
             key = f"{meta['file_path']}:{meta['start_line']}"
-            scores[key] = {
+            rrf_scores[key] = {
                 **meta,
                 'content': doc,
                 'dense_score': round(1 - distance, 4),
                 'bm25_score': 0.0,
+                'rrf_score': 1 / (K + rank)
             }
 
-        
-        if sparse_results:
-            max_bm25 = max(r['bm25_score'] for r in sparse_results)
-            for r in sparse_results:
-                key = f"{r['file_path']}:{r['start_line']}"
-                normalized = round(r['bm25_score'] / max_bm25, 4) if max_bm25 > 0 else 0
-                if key in scores:
-                    scores[key]['bm25_score'] = normalized
-                else:
-                    scores[key] = {**r, 'dense_score': 0.0, 'bm25_score': normalized}
+        for rank, r in enumerate(sparse_results, start=1):
+            key = f"{r['file_path']}:{r['start_line']}"
+            bm25_rrf = 1 / (K + rank)
+            if key in rrf_scores:
+                rrf_scores[key]['rrf_score'] += bm25_rrf
+                rrf_scores[key]['bm25_score'] = r['bm25_score']
+            else:
+                rrf_scores[key] = {
+                    **r,
+                    'dense_score': 0.0,
+                    'rrf_score': bm25_rrf
+                }
 
         
-        for key in scores:
-            s = scores[key]
-            s['combined_score'] = round(
-                0.6 * s['dense_score'] + 0.4 * s['bm25_score'], 4
-            )
+        for key in rrf_scores:
+            rrf_scores[key]['rrf_score'] = round(rrf_scores[key]['rrf_score'], 6)
 
-        ranked = sorted(scores.values(), key=lambda x: x['combined_score'], reverse=True)
+        ranked = sorted(
+            rrf_scores.values(),
+            key=lambda x: x['rrf_score'],
+            reverse=True
+        )
 
         return {
             "question": request.question,

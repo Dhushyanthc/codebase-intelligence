@@ -11,6 +11,9 @@ LANGUAGE_MAP = {
     '.go': Language(tsgo.language()),
 }
 
+MAX_LINES = 50
+OVERLAP_LINES = 10
+
 FUNCTION_NODE_TYPES = {
     '.py': ['function_definition', 'class_definition'],
     '.js': ['function_declaration', 'class_declaration', 'arrow_function'],
@@ -18,54 +21,90 @@ FUNCTION_NODE_TYPES = {
     '.go': ['function_declaration', 'method_declaration'],
 }
 
+
+def split_large_chunk(chunk: dict, source_lines: list[str]) -> list[dict]:
+    start = chunk['start_line'] - 1
+    end = chunk['end_line']
+    total_lines = end - start
+
+    if total_lines <= MAX_LINES:
+        return [chunk]
+
+    sub_chunks = []
+    current_start = start
+
+    while current_start < end:
+        current_end = min(current_start + MAX_LINES, end)
+        content = '\n'.join(source_lines[current_start:current_end])
+
+        sub_chunks.append({
+            'file_path': chunk['file_path'],
+            'start_line': current_start + 1,
+            'end_line': current_end,
+            'node_type': chunk['node_type'],
+            'content': content,
+        })
+
+        current_start = current_end - OVERLAP_LINES
+
+    return sub_chunks
+
+
 def chunk_file(file_path: str) -> list:
-  _, ext = os.path.splitext(file_path)
+    _, ext = os.path.splitext(file_path)
 
-  if ext not in LANGUAGE_MAP:
-    print(f"Unsupported file type: {ext}")
-    return []
-  
-  language = LANGUAGE_MAP[ext]
-  parser = Parser(language)
+    if ext not in LANGUAGE_MAP:
+        print(f"Unsupported file type: {ext}")
+        return []
 
-  with open(file_path, 'r', encoding='utf-8', errors = 'ignore') as f:
-    source_code = f.read()
+    language = LANGUAGE_MAP[ext]
+    parser = Parser(language)
 
-  source_bytes = bytes(source_code, 'utf8')
-  tree = parser.parse(source_bytes)
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        source_code = f.read()
 
-  chunks = []
-  node_types = FUNCTION_NODE_TYPES.get(ext, [])
+    source_lines = source_code.splitlines()
+    source_bytes = bytes(source_code, 'utf-8')
+    tree = parser.parse(source_bytes)
 
-  def traverse(node):
-    if node.type in node_types:
-      start_line = node.start_point[0] + 1
-      end_line = node.end_point[0] + 1
-      chunk_text = source_code[node.start_byte: node.end_byte]
+    chunks = []
+    node_types = FUNCTION_NODE_TYPES.get(ext, [])
 
-      chunks.append({
-        'file_path': file_path,
-        'start_line': start_line,
-        'end_line': end_line, 
-        'node_type': node.type,
-        'content': chunk_text,
-      })
-    
-    for child in node.children:
-      traverse(child)
+    def traverse(node):
+        if node.type in node_types:
+            start_line = node.start_point[0] + 1
+            end_line = node.end_point[0] + 1
+            chunk_text = source_code[node.start_byte:node.end_byte]
 
-  traverse(tree.root_node)
-  return chunks
+            chunks.append({
+                'file_path': file_path,
+                'start_line': start_line,
+                'end_line': end_line,
+                'node_type': node.type,
+                'content': chunk_text,
+            })
+
+        for child in node.children:
+            traverse(child)
+
+    traverse(tree.root_node)
+
+    final_chunks = []
+    for chunk in chunks:
+        final_chunks.extend(split_large_chunk(chunk, source_lines))
+
+    return final_chunks
 
 
 def chunk_files(file_paths: list[str]) -> list:
-  all_chunks =[]
+    all_chunks = []
 
-  for file_path in file_paths:
-    try:
-      chunks = chunk_file(file_path)
-      all_chunks.extend(chunks)
-      print(f"Chunked {file_path} into {len(chunks)} chunks")
-    except Exception as e:
-      print(f"Error chunking {file_path}: {e}")
-  return all_chunks
+    for file_path in file_paths:
+        try:
+            chunks = chunk_file(file_path)
+            all_chunks.extend(chunks)
+            print(f"Chunked {file_path} into {len(chunks)} chunks")
+        except Exception as e:
+            print(f"Error chunking {file_path}: {e}")
+
+    return all_chunks
