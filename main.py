@@ -10,6 +10,7 @@ from app.chunker import chunk_files
 from app.embedder import embed_chunks
 from app.vector_store import store_embeddings, query_collection
 from app.bm25_store import save_bm25_index, query_bm25
+from app.generator import  generate_answer
 
 load_dotenv()
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -147,6 +148,70 @@ def query_hybrid(request: QueryRequest):
         }
 
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ask")
+def ask(request: QueryRequest):
+    try:
+        repo_name = repo_url_to_name(request.repo_url)
+
+        
+        result = client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=request.question,
+            config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
+        )
+        query_vector = result.embeddings[0].values
+        dense_results = query_collection(repo_name, query_vector, request.n_results * 2)
+        sparse_results = query_bm25(repo_name, request.question, request.n_results * 2)
+
+        K = 60
+        rrf_scores = {}
+
+        for rank, (doc, meta, distance) in enumerate(zip(
+            dense_results['documents'][0],
+            dense_results['metadatas'][0],
+            dense_results['distances'][0]
+        ), start=1):
+            key = f"{meta['file_path']}:{meta['start_line']}"
+            rrf_scores[key] = {
+                **meta,
+                'content': doc,
+                'rrf_score': 1 / (K + rank)
+            }
+
+        for rank, r in enumerate(sparse_results, start=1):
+            key = f"{r['file_path']}:{r['start_line']}"
+            bm25_rrf = 1 / (K + rank)
+            if key in rrf_scores:
+                rrf_scores[key]['rrf_score'] += bm25_rrf
+            else:
+                rrf_scores[key] = {**r, 'rrf_score': bm25_rrf}
+
+        ranked = sorted(rrf_scores.values(), key=lambda x: x['rrf_score'], reverse=True)
+        top_chunks = ranked[:request.n_results]
+
+        
+        result = generate_answer(request.question, top_chunks)
+
+        return {
+            "question": request.question,
+            "answer": result['answer'],
+            "chunks_used": result['chunks_used'],
+            "sources": [
+                {
+                    "file_path": c['file_path'],
+                    "start_line": c['start_line'],
+                    "end_line": c['end_line'],
+                }
+                for c in top_chunks
+            ]
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
