@@ -11,6 +11,7 @@ from app.embedder import embed_chunks
 from app.vector_store import store_embeddings, query_collection
 from app.bm25_store import save_bm25_index, query_bm25
 from app.generator import  generate_answer
+from app.agent import agent, AgentState
 
 load_dotenv()
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -207,6 +208,38 @@ def ask(request: QueryRequest):
                 }
                 for c in top_chunks
             ]
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/agent/ask")
+def agent_ask(request: QueryRequest):
+    try:
+        repo_name = repo_url_to_name(request.repo_url)
+
+        initial_state: AgentState = {
+            "question": request.question,
+            "repo_url": request.repo_url,
+            "repo_name": repo_name,
+            "tool_decision": "",
+            "clarification_question": "",
+            "retrieved_chunks": [],
+            "final_answer": "",
+            "sources": []
+        }
+
+        final_state = agent.invoke(initial_state)
+
+        return {
+            "question": request.question,
+            "tool_used": final_state['tool_decision'],
+            "answer": final_state['final_answer'],
+            "sources": final_state['sources'],
+            "needs_clarification": final_state['tool_decision'] == 'clarify'
         }
 
     except Exception as e:
