@@ -1,0 +1,12 @@
+fastapi
+pydantic
+dotenv
+langgraph
+langsmith
+rank_bm25
+tree_sitter
+tree_sitter_python
+tree_sitter_javascript
+tree_sitter_go
+git+https://github.com/gitpython-developers/GitPython.git
+chromadb

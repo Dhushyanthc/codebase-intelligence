@@ -3,6 +3,7 @@ from tree_sitter import Language, Parser
 import tree_sitter_python as tspython
 import tree_sitter_javascript as tsjavascript
 import tree_sitter_go as tsgo
+import concurrent.futures
 
 LANGUAGE_MAP = {
     '.py': Language(tspython.language()),
@@ -45,7 +46,8 @@ def split_large_chunk(chunk: dict, source_lines: list[str]) -> list[dict]:
             'content': content,
         })
 
-        current_start = current_end - OVERLAP_LINES
+        # Reduce overlap to improve performance
+        current_start = current_end
 
     return sub_chunks
 
@@ -61,9 +63,9 @@ def chunk_file(file_path: str) -> list:
     parser = Parser(language)
 
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        source_code = f.read()
+        source_lines = f.readlines()
 
-    source_lines = source_code.splitlines()
+    source_code = ''.join(source_lines)
     source_bytes = bytes(source_code, 'utf-8')
     tree = parser.parse(source_bytes)
 
@@ -99,12 +101,20 @@ def chunk_file(file_path: str) -> list:
 def chunk_files(file_paths: list[str]) -> list:
     all_chunks = []
 
-    for file_path in file_paths:
+    def process_file(file_path):
         try:
             chunks = chunk_file(file_path)
-            all_chunks.extend(chunks)
             print(f"Chunked {file_path} into {len(chunks)} chunks")
+            return chunks
         except Exception as e:
             print(f"Error chunking {file_path}: {e}")
+            return []
+
+    # Use ThreadPoolExecutor for parallel processing
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        results = executor.map(process_file, file_paths)
+
+    for result in results:
+        all_chunks.extend(result)
 
     return all_chunks
