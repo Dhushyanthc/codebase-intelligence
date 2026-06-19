@@ -1,3 +1,4 @@
+import concurrent.futures
 from app.config import RRF_K
 from app.vector_store import query_collection
 from app.bm25_store import query_bm25
@@ -5,11 +6,18 @@ from app.embedder import get_query_embedding
 
 
 def hybrid_search(repo_name: str, question: str, n_results: int = 5) -> list[dict]:
-    query_vector = get_query_embedding(question)
     fetch_count = n_results * 2
 
+    # Run embedding and BM25 in parallel — they don't depend on each other
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        embedding_future = executor.submit(get_query_embedding, question)
+        bm25_future = executor.submit(query_bm25, repo_name, question, fetch_count)
+
+        query_vector = embedding_future.result()
+        sparse_results = bm25_future.result()
+
+    # ChromaDB query depends on the embedding, so it runs after
     dense_results = query_collection(repo_name, query_vector, fetch_count)
-    sparse_results = query_bm25(repo_name, question, fetch_count)
 
     rrf_scores = {}
 

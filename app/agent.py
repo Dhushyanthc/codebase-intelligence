@@ -8,6 +8,7 @@ from langsmith import traceable
 from app.config import GEMINI_API_KEY, ROUTER_MODEL, ROUTER_TEMPERATURE
 from app.retrieval import hybrid_search
 from app.generator import generate_answer
+from app.pre_router import pre_route
 
 logger = logging.getLogger("codebase-intelligence")
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -18,6 +19,7 @@ class AgentState(TypedDict):
     repo_url: str
     repo_name: str
     tool_decision: str
+    pre_route_decision: str
     clarification_question: str
     retrieved_chunks: list
     final_answer: str
@@ -56,8 +58,21 @@ def _extract_response_text(response) -> str:
     return text.strip()
 
 
-@traceable(name="router_node")
-def router_node(state: AgentState) -> AgentState:
+@traceable(name="pre_router_node")
+def pre_router_node(state: AgentState) -> AgentState:
+    result = pre_route(state['question'], state['repo_name'])
+    state['pre_route_decision'] = result['decision']
+    if result['decision'] == 'clarify':
+        state['tool_decision'] = 'clarify'
+        state['clarification_question'] = result['clarification_question']
+    elif result['decision'] == 'codebase_search':
+        state['tool_decision'] = 'codebase_search'
+    # if "uncertain", tool_decision stays empty — LLM router will fill it
+    return state
+
+
+@traceable(name="llm_router_node")
+def llm_router_node(state: AgentState) -> AgentState:
     prompt = f"Question: {state['question']}\nRepository: {state['repo_url']}"
     response = client.models.generate_content(
         model=ROUTER_MODEL,
@@ -76,7 +91,7 @@ def router_node(state: AgentState) -> AgentState:
     decision = json.loads(text)
     state['tool_decision'] = decision['tool']
     state['clarification_question'] = decision.get('clarification_question') or ''
-    logger.info(f"Router decision: {decision['tool']} | Reason: {decision['reason']}")
+    logger.info(f"LLM router decision: {decision['tool']} | Reason: {decision['reason']}")
     return state
 
 
@@ -116,7 +131,16 @@ def clarify_node(state: AgentState) -> AgentState:
     return state
 
 
-def route_decision(state: AgentState) -> Literal["codebase_search", "clarify"]:
+def pre_route_decision(state: AgentState) -> Literal["codebase_search", "clarify", "llm_router"]:
+    decision = state.get('pre_route_decision', 'uncertain')
+    if decision == 'codebase_search':
+        return 'codebase_search'
+    elif decision == 'clarify':
+        return 'clarify'
+    return 'llm_router'
+
+
+def llm_route_decision(state: AgentState) -> Literal["codebase_search", "clarify"]:
     if state['tool_decision'] == 'clarify':
         return 'clarify'
     return 'codebase_search'
@@ -124,15 +148,22 @@ def route_decision(state: AgentState) -> Literal["codebase_search", "clarify"]:
 
 def build_agent():
     graph = StateGraph(AgentState)
-    graph.add_node("router", router_node)
+
+    # Nodes
+    graph.add_node("pre_router", pre_router_node)
+    graph.add_node("llm_router", llm_router_node)
     graph.add_node("codebase_search", codebase_search_node)
     graph.add_node("generate", generate_node)
     graph.add_node("clarify", clarify_node)
-    graph.add_edge(START, "router")
-    graph.add_conditional_edges("router", route_decision)
+
+    # Edges
+    graph.add_edge(START, "pre_router")
+    graph.add_conditional_edges("pre_router", pre_route_decision)
+    graph.add_conditional_edges("llm_router", llm_route_decision)
     graph.add_edge("codebase_search", "generate")
     graph.add_edge("generate", END)
     graph.add_edge("clarify", END)
+
     return graph.compile()
 
 

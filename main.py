@@ -230,6 +230,7 @@ def agent_ask(request: Request, body: QueryRequest):
             "repo_url": body.repo_url,
             "repo_name": repo_name,
             "tool_decision": "",
+            "pre_route_decision": "",
             "clarification_question": "",
             "retrieved_chunks": [],
             "final_answer": "",
