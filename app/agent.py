@@ -1,18 +1,17 @@
-import os
 import json
+import logging
 from typing import TypedDict, Literal
 from langgraph.graph import StateGraph, START, END
-from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from langsmith import traceable
-
-from app.vector_store import query_collection
-from app.bm25_store import query_bm25
+from app.config import GEMINI_API_KEY, ROUTER_MODEL, ROUTER_TEMPERATURE
+from app.retrieval import hybrid_search
 from app.generator import generate_answer
 
-load_dotenv()
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+logger = logging.getLogger("codebase-intelligence")
+client = genai.Client(api_key=GEMINI_API_KEY)
+
 
 class AgentState(TypedDict):
     question: str
@@ -35,94 +34,57 @@ Given a user's question and the GitHub repository URL they are asking about, dec
    - Code structure, architecture, or patterns used
    - Specific files, methods, or variables
 
-2. "web_search" - Use when the question is about:
-   - External libraries or dependencies used in the repo
-   - Security vulnerabilities or CVEs affecting the repo
-   - Best practices or comparisons with other approaches
-   - Anything that requires knowledge beyond the repository code
-
-3. "clarify" - Use when the question is:
-   - Too vague to search effectively (e.g., "how does it work?")
-   - Ambiguous about which part of the codebase it refers to
-   - Missing context needed to give a useful answer
+2. "clarify" - Use when:
+   - The question is too vague (e.g., "how does it work?") — ask the user to be more specific
+   - The question requires external knowledge not in the codebase (CVEs, library docs, best practices comparisons) — set clarification_question to a message explaining this limitation and suggesting they consult external sources
 
 Respond with valid JSON only. No explanation, no markdown, just JSON:
 {
-  "tool": "codebase_search" | "web_search" | "clarify",
+  "tool": "codebase_search" | "clarify",
   "reason": "one sentence explaining why",
-  "clarification_question": "only if tool is clarify, the question to ask the user, otherwise null"
+  "clarification_question": "required when tool is clarify — either ask for more specifics or explain the limitation"
 }"""
+
+
+def _extract_response_text(response) -> str:
+    text = response.text or ""
+    if not text and response.candidates:
+        for part in reversed(response.candidates[0].content.parts):
+            if getattr(part, 'text', None):
+                text = part.text
+                break
+    return text.strip()
 
 
 @traceable(name="router_node")
 def router_node(state: AgentState) -> AgentState:
     prompt = f"Question: {state['question']}\nRepository: {state['repo_url']}"
-
     response = client.models.generate_content(
-        model="gemini-3-flash-preview",
+        model=ROUTER_MODEL,
         config=types.GenerateContentConfig(
             system_instruction=ROUTER_PROMPT,
-            temperature=0.1,
+            temperature=ROUTER_TEMPERATURE,
             response_mime_type="application/json",
+            max_output_tokens=256,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
         ),
         contents=prompt
     )
-
-    decision = json.loads(response.text)
-
+    text = _extract_response_text(response)
+    if not text:
+        raise ValueError("Router returned empty response")
+    decision = json.loads(text)
     state['tool_decision'] = decision['tool']
     state['clarification_question'] = decision.get('clarification_question') or ''
-
-    print(f"[router] Decision: {decision['tool']} | Reason: {decision['reason']}")
+    logger.info(f"Router decision: {decision['tool']} | Reason: {decision['reason']}")
     return state
+
 
 @traceable(name="codebase_search_node")
 def codebase_search_node(state: AgentState) -> AgentState:
-    repo_name = state['repo_name']
-    question = state['question']
-
-    # Embed the question
-    result = client.models.embed_content(
-        model="gemini-embedding-001",
-        contents=question,
-        config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
-    )
-    query_vector = result.embeddings[0].values
-
-    # Dense retrieval
-    dense_results = query_collection(repo_name, query_vector, n_results=10)
-
-    # BM25 retrieval
-    sparse_results = query_bm25(repo_name, question, n_results=10)
-
-    # RRF fusion
-    K = 60
-    rrf_scores = {}
-
-    for rank, (doc, meta, distance) in enumerate(zip(
-        dense_results['documents'][0],
-        dense_results['metadatas'][0],
-        dense_results['distances'][0]
-    ), start=1):
-        key = f"{meta['file_path']}:{meta['start_line']}"
-        rrf_scores[key] = {
-            **meta,
-            'content': doc,
-            'rrf_score': 1 / (K + rank)
-        }
-
-    for rank, r in enumerate(sparse_results, start=1):
-        key = f"{r['file_path']}:{r['start_line']}"
-        bm25_rrf = 1 / (K + rank)
-        if key in rrf_scores:
-            rrf_scores[key]['rrf_score'] += bm25_rrf
-        else:
-            rrf_scores[key] = {**r, 'rrf_score': bm25_rrf}
-
-    ranked = sorted(rrf_scores.values(), key=lambda x: x['rrf_score'], reverse=True)
-    state['retrieved_chunks'] = ranked[:5]
-
-    print(f"[codebase_search] Retrieved {len(state['retrieved_chunks'])} chunks")
+    ranked = hybrid_search(state['repo_name'], state['question'], n_results=5)
+    state['retrieved_chunks'] = ranked
+    logger.info(f"Retrieved {len(ranked)} chunks for query")
     return state
 
 
@@ -138,15 +100,19 @@ def generate_node(state: AgentState) -> AgentState:
         }
         for c in state['retrieved_chunks']
     ]
-    print(f"[generate] Answer generated")
+    logger.info("Answer generated")
     return state
 
 
 @traceable(name="clarify_node")
 def clarify_node(state: AgentState) -> AgentState:
-    state['final_answer'] = state['clarification_question']
+    message = state['clarification_question'] or (
+        "This question requires information beyond what's available in the codebase. "
+        "Please consult external sources, or ask a question about the code itself."
+    )
+    state['final_answer'] = message
     state['sources'] = []
-    print(f"[clarify] Asking: {state['clarification_question']}")
+    logger.info(f"Clarify response: {message}")
     return state
 
 
@@ -158,20 +124,15 @@ def route_decision(state: AgentState) -> Literal["codebase_search", "clarify"]:
 
 def build_agent():
     graph = StateGraph(AgentState)
-
-    # Add nodes
     graph.add_node("router", router_node)
     graph.add_node("codebase_search", codebase_search_node)
     graph.add_node("generate", generate_node)
     graph.add_node("clarify", clarify_node)
-
-    # Add edges
     graph.add_edge(START, "router")
     graph.add_conditional_edges("router", route_decision)
     graph.add_edge("codebase_search", "generate")
     graph.add_edge("generate", END)
     graph.add_edge("clarify", END)
-
     return graph.compile()
 
 

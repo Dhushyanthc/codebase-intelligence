@@ -1,0 +1,10 @@
+.git
+.env
+__pycache__
+*.pyc
+chroma_db/
+bm25_db/
+.venv
+venv
+readme_image/
+*.md

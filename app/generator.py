@@ -1,10 +1,10 @@
+import logging
 from google import genai
 from google.genai import types
-import os
-from dotenv import load_dotenv
+from app.config import GEMINI_API_KEY, GENERATION_MODEL, GENERATION_MAX_TOKENS, GENERATION_TEMPERATURE
 
-load_dotenv()
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+logger = logging.getLogger("codebase-intelligence")
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 SYSTEM_PROMPT = """You are an expert code assistant that answers questions about software codebases.
 
@@ -24,9 +24,7 @@ Format citations as: `filename.py` (lines X-Y)"""
 
 def format_context(chunks: list[dict]) -> str:
     context_parts = []
-
     for i, chunk in enumerate(chunks, start=1):
-        file_name = chunk['file_path'].split('/')[-1]
         context_parts.append(
             f"--- Chunk {i} ---\n"
             f"File: {chunk['file_path']}\n"
@@ -34,19 +32,14 @@ def format_context(chunks: list[dict]) -> str:
             f"Type: {chunk['node_type']}\n"
             f"Code:\n{chunk['content']}\n"
         )
-
     return '\n'.join(context_parts)
 
 
 def generate_answer(question: str, chunks: list[dict]) -> dict:
     if not chunks:
-        return {
-            "answer": "No relevant code chunks found for this question.",
-            "chunks_used": 0
-        }
+        return {"answer": "No relevant code chunks found for this question.", "chunks_used": 0}
 
     context = format_context(chunks)
-
     prompt = f"""Question: {question}
 
 Relevant code from the codebase:
@@ -56,15 +49,18 @@ Relevant code from the codebase:
 Answer the question based on the code above. Cite specific files and line numbers."""
 
     response = client.models.generate_content(
-        model="gemini-3-flash-preview",
+        model=GENERATION_MODEL,
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
-            temperature=0.2,
+            temperature=GENERATION_TEMPERATURE,
+            max_output_tokens=GENERATION_MAX_TOKENS,
         ),
         contents=prompt
     )
-
-    return {
-        "answer": response.text,
-        "chunks_used": len(chunks)
-    }
+    text = response.text or ""
+    if not text and response.candidates:
+        for part in reversed(response.candidates[0].content.parts):
+            if getattr(part, 'text', None):
+                text = part.text
+                break
+    return {"answer": text, "chunks_used": len(chunks)}
