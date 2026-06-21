@@ -1,8 +1,11 @@
+import logging
 import concurrent.futures
 from app.config import RRF_K
 from app.vector_store import query_collection
 from app.bm25_store import query_bm25
 from app.embedder import get_query_embedding
+
+logger = logging.getLogger("codebase-intelligence")
 
 
 def hybrid_search(repo_name: str, question: str, n_results: int = 5) -> list[dict]:
@@ -14,7 +17,11 @@ def hybrid_search(repo_name: str, question: str, n_results: int = 5) -> list[dic
         bm25_future = executor.submit(query_bm25, repo_name, question, fetch_count)
 
         query_vector = embedding_future.result()
-        sparse_results = bm25_future.result()
+        try:
+            sparse_results = bm25_future.result()
+        except FileNotFoundError:
+            logger.warning(f"[retrieval] BM25 index not found for {repo_name}, falling back to dense-only search")
+            sparse_results = []
 
     # ChromaDB query depends on the embedding, so it runs after
     dense_results = query_collection(repo_name, query_vector, fetch_count)

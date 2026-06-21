@@ -1,14 +1,15 @@
-echo "venv/
-__pycache__/
-*.pyc
-.env" > .gitignore
-
 .env
 
 .venv
 .venv/
 
 venv/
+
+__pycache__/
+*.pyc
+
+# Cloned repositories (stored locally instead of /tmp)
+cloned_repos/
 
 # Ignore VS Code settings
 .vscode/

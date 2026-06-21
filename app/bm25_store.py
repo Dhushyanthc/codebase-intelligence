@@ -33,6 +33,7 @@ def save_bm25_index(repo_name: str, chunks: list[dict]):
         'content': chunk['content'],
     } for chunk in chunks]
     path = os.path.join(BM25_PATH, f"{repo_name}.json")
+    logger.info(f"[bm25] Saving index to: {os.path.abspath(path)}")
     with open(path, 'w') as f:
         json.dump({'corpus': corpus, 'metadata': metadata}, f)
     logger.info(f"Saved BM25 index for '{repo_name}' with {len(corpus)} documents")
@@ -40,7 +41,13 @@ def save_bm25_index(repo_name: str, chunks: list[dict]):
 
 def load_bm25_index(repo_name: str):
     path = os.path.join(BM25_PATH, f"{repo_name}.json")
+    logger.info(f"[bm25] Looking for index at: {os.path.abspath(path)} | Exists: {os.path.exists(path)}")
     if not os.path.exists(path):
+        if os.path.isdir(BM25_PATH):
+            files = os.listdir(BM25_PATH)
+            logger.error(f"[bm25] Files in {BM25_PATH}: {files}")
+        else:
+            logger.error(f"[bm25] BM25 directory does not exist: {BM25_PATH}")
         raise FileNotFoundError(f"No BM25 index found for repo: {repo_name}")
 
     file_hash = _get_file_hash(path)

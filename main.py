@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 
 from fastapi import FastAPI, HTTPException, Request, Security, Depends, APIRouter
 from fastapi.responses import JSONResponse
@@ -21,7 +22,7 @@ from app.config import (
 from app.repo_handler import clone_repository, filter_repo_files, is_valid_git_url
 from app.chunker import chunk_files
 from app.embedder import embed_chunks, get_query_embedding
-from app.vector_store import store_embeddings, query_collection, delete_collection, get_client as get_chroma_client
+from app.vector_store import store_embeddings, query_collection, delete_collection, get_collection, get_client as get_chroma_client
 from app.bm25_store import save_bm25_index, invalidate_bm25_cache
 from app.retrieval import hybrid_search
 from app.generator import generate_answer
@@ -34,6 +35,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger("codebase-intelligence")
+
+_gemini_health_cache = {"status": None, "checked_at": 0}
+GEMINI_HEALTH_TTL = 300
 
 genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -85,15 +89,19 @@ def health():
 
     checks["bm25_storage"] = "ok" if os.path.isdir(BM25_PATH) else "error: directory missing"
 
-    try:
-        genai_client.models.embed_content(
-            model="gemini-embedding-001",
-            contents="health check",
-            config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
-        )
-        checks["gemini_api"] = "ok"
-    except Exception as e:
-        checks["gemini_api"] = f"error: {str(e)}"
+    now = time.time()
+    if now - _gemini_health_cache["checked_at"] > GEMINI_HEALTH_TTL:
+        try:
+            genai_client.models.embed_content(
+                model="gemini-embedding-001",
+                contents="health check",
+                config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
+            )
+            _gemini_health_cache["status"] = "ok"
+        except Exception as e:
+            _gemini_health_cache["status"] = f"error: {str(e)}"
+        _gemini_health_cache["checked_at"] = now
+    checks["gemini_api"] = _gemini_health_cache["status"] or "not checked yet"
 
     status = "healthy" if all(v == "ok" for v in checks.values()) else "degraded"
     return {"status": status, "checks": checks}
@@ -127,7 +135,21 @@ router = APIRouter(dependencies=[Depends(verify_api_key)])
 
 
 def repo_url_to_name(repo_url: str) -> str:
-    return repo_url.strip('/').split('github.com/')[-1].replace('/', '_')
+    name = repo_url.strip('/').split('github.com/')[-1].replace('/', '_')
+    if name.endswith('.git'):
+        name = name[:-4]
+    return name
+
+
+def is_repo_indexed(repo_name: str) -> bool:
+    try:
+        collection = get_collection(repo_name)
+        if collection.count() == 0:
+            return False
+    except Exception:
+        return False
+    bm25_path = os.path.join(BM25_PATH, f"{repo_name}.json")
+    return os.path.exists(bm25_path)
 
 
 @router.post("/index")
@@ -160,6 +182,8 @@ def index_repo(request: Request, body: IndexRequest):
 def query_repo(request: Request, body: QueryRequest):
     try:
         repo_name = repo_url_to_name(body.repo_url)
+        if not is_repo_indexed(repo_name):
+            raise HTTPException(status_code=404, detail=f"Repository '{repo_name}' has not been indexed yet. Call POST /index first.")
         query_vector = get_query_embedding(body.question)
         results = query_collection(repo_name, query_vector, body.n_results)
 
@@ -188,6 +212,8 @@ def query_repo(request: Request, body: QueryRequest):
 def query_hybrid(request: Request, body: QueryRequest):
     try:
         repo_name = repo_url_to_name(body.repo_url)
+        if not is_repo_indexed(repo_name):
+            raise HTTPException(status_code=404, detail=f"Repository '{repo_name}' has not been indexed yet. Call POST /index first.")
         ranked = hybrid_search(repo_name, body.question, body.n_results)
         return {"question": body.question, "results": ranked}
     except Exception as e:
@@ -200,6 +226,8 @@ def query_hybrid(request: Request, body: QueryRequest):
 def ask(request: Request, body: QueryRequest):
     try:
         repo_name = repo_url_to_name(body.repo_url)
+        if not is_repo_indexed(repo_name):
+            raise HTTPException(status_code=404, detail=f"Repository '{repo_name}' has not been indexed yet. Call POST /index first.")
         top_chunks = hybrid_search(repo_name, body.question, body.n_results)
         result = generate_answer(body.question, top_chunks)
         return {
@@ -225,6 +253,8 @@ def ask(request: Request, body: QueryRequest):
 def agent_ask(request: Request, body: QueryRequest):
     try:
         repo_name = repo_url_to_name(body.repo_url)
+        if not is_repo_indexed(repo_name):
+            raise HTTPException(status_code=404, detail=f"Repository '{repo_name}' has not been indexed yet. Call POST /index first.")
         initial_state: AgentState = {
             "question": body.question,
             "repo_url": body.repo_url,
