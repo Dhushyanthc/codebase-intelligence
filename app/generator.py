@@ -6,20 +6,13 @@ from app.config import GEMINI_API_KEY, GENERATION_MODEL, GENERATION_MAX_TOKENS, 
 logger = logging.getLogger("codebase-intelligence")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-SYSTEM_PROMPT = """You are an expert code assistant that answers questions about software codebases.
+SYSTEM_PROMPT = """You are a code assistant that answers questions ONLY using the provided code chunks. Follow these rules strictly:
 
-You will be given:
-1. A question about a codebase
-2. Relevant code chunks retrieved from that codebase, each with file path and line numbers
-
-Your job:
-- Answer the question based ONLY on the provided code chunks
-- Always cite the specific file and line numbers when referencing code
-- If the answer cannot be found in the provided chunks, say so explicitly
-- Be precise and technical — the user is a developer
-- Do not hallucinate code or behavior that isn't in the chunks
-
-Format citations as: `filename.py` (lines X-Y)"""
+1. ONLY use information present in the code chunks below. Do not use your own knowledge about libraries, frameworks, or coding patterns.
+2. If the answer is not in the provided chunks, say "Based on the retrieved code, I cannot find information about this." Do not guess or infer beyond what the code shows.
+3. Every claim you make must reference a specific file and line number from the chunks.
+4. If a chunk partially answers the question, say what you can confirm from the code and explicitly state what is not covered in the retrieved context.
+5. Do not explain how things "typically work" or "usually are implemented" — only describe what the actual code does."""
 
 
 def format_context(chunks: list[dict]) -> str:
@@ -40,13 +33,7 @@ def generate_answer(question: str, chunks: list[dict]) -> dict:
         return {"answer": "No relevant code chunks found for this question.", "chunks_used": 0}
 
     context = format_context(chunks)
-    prompt = f"""Question: {question}
-
-Relevant code from the codebase:
-
-{context}
-
-Answer the question based on the code above. Cite specific files and line numbers."""
+    prompt = f"Question: {question}\n\nRelevant code from the codebase:\n\n{context}\n\nAnswer the question using ONLY the code chunks above. Every claim must cite a specific file and line number. If the code chunks don't contain the answer, say so explicitly."
 
     response = client.models.generate_content(
         model=GENERATION_MODEL,
